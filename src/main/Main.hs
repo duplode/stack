@@ -51,6 +51,7 @@ import qualified Stack.PackageIndex
 import           Stack.Repl
 import           Stack.SDist (getSDistTarball)
 import           Stack.Setup
+import           Stack.Sig.Sign
 import           Stack.Solver (solveExtraDeps)
 import           Stack.Types
 import           Stack.Types.Internal
@@ -164,7 +165,10 @@ main = withInterpreterArgs stackProgName $ \args isInterpreter ->
              addCommand "upload"
                         "Upload a package to Hackage"
                         uploadCmd
-                        (many $ strArgument $ metavar "TARBALL/DIR")
+                        ((,) <$> (flag False True
+                                  (long "sign" <>
+                                   help "GPG sign & submit signature")) <*>
+                         (many $ strArgument $ metavar "TARBALL/DIR"))
              addCommand "dot"
                         "Visualize your project's dependency graph using Graphviz dot"
                         dotCmd
@@ -541,9 +545,9 @@ upgradeCmd fromGit go = withConfig go $
     upgrade fromGit (globalResolver go)
 
 -- | Upload to Hackage
-uploadCmd :: [String] -> GlobalOpts -> IO ()
-uploadCmd [] _ = error "To upload the current project, please run 'stack upload .'"
-uploadCmd args go = do
+uploadCmd :: (Bool, [String]) -> GlobalOpts -> IO ()
+uploadCmd (_,[]) _ = error "To upload the current project, please run 'stack upload .'"
+uploadCmd (shouldSign,args) go = do
     let partitionM _ [] = return ([], [])
         partitionM f (x:xs) = do
             r <- f x
@@ -562,16 +566,23 @@ uploadCmd args go = do
                     Upload.setGetManager (return manager) $
                     Upload.defaultUploadSettings
             liftIO $ Upload.mkUploader config uploadSettings
+        sigServiceUrl = "https://sig.commercialhaskell.org/"
     if null dirs
         then withConfig go $ do
             uploader <- getUploader
-            liftIO $ forM_ files (Upload.upload uploader)
+            forM_ files (\f -> do liftIO (Upload.upload uploader f)
+                                  when shouldSign
+                                    (sign sigServiceUrl f))
         else withBuildConfig go ExecStrategy $ do
             uploader <- getUploader
-            liftIO $ forM_ files (Upload.upload uploader)
+            forM_ files (\f -> do liftIO (Upload.upload uploader f)
+                                  when shouldSign
+                                    (sign sigServiceUrl f))
             forM_ dirs $ \dir -> do
                 (tarName, tarBytes) <- getSDistTarball dir
                 liftIO $ Upload.uploadBytes uploader tarName tarBytes
+                when shouldSign
+                  (signTarBytes sigServiceUrl tarName tarBytes)
 
 -- | Execute a command.
 execCmd :: ExecOpts -> GlobalOpts -> IO ()
