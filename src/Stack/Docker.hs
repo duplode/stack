@@ -65,6 +65,7 @@ reexecWithOptionalContainer
     => Maybe (Path Abs Dir)
     -> IO ()
     -> m ()
+    -> m ()
 reexecWithOptionalContainer mprojectRoot =
   execWithOptionalContainer mprojectRoot getCmdArgs
   where
@@ -89,13 +90,14 @@ execWithOptionalContainer
     -> IO (FilePath,[String],Config -> Config)
     -> IO ()
     -> m ()
-execWithOptionalContainer mprojectRoot getCmdArgs inner =
+    -> m ()
+execWithOptionalContainer mprojectRoot getCmdArgs inner after =
   do config <- asks getConfig
      inContainer <- getInContainer
      if inContainer || not (dockerEnable (configDocker config))
         then liftIO inner
         else do (cmd_,args,modConfig) <- liftIO getCmdArgs
-                runContainerAndExit modConfig mprojectRoot cmd_ args []
+                runContainerAndExit modConfig mprojectRoot cmd_ args [] after
 
 -- | If Docker is enabled, re-runs the OS command returned by the second argument in a
 -- Docker container.  Otherwise, throws 'DockerMustBeEnabledException'.
@@ -104,12 +106,13 @@ execWithRequiredContainer
     => Maybe (Path Abs Dir)
     -> IO (FilePath,[String],Config -> Config)
     -> m ()
-execWithRequiredContainer mprojectRoot getCmdArgs =
+    -> m ()
+execWithRequiredContainer mprojectRoot getCmdArgs after =
   do config <- asks getConfig
      unless (dockerEnable (configDocker config))
-          (throwM DockerMustBeEnabledException)
+            (throwM DockerMustBeEnabledException)
      (cmd_,args,modConfig) <- liftIO getCmdArgs
-     runContainerAndExit modConfig mprojectRoot cmd_ args []
+     runContainerAndExit modConfig mprojectRoot cmd_ args [] after
 
 -- | Error if running in a container.
 preventInContainer :: (MonadIO m,MonadThrow m) => m () -> m ()
@@ -135,11 +138,13 @@ runContainerAndExit :: M env m
                     -> [String]
                     -> [(String, String)]
                     -> m ()
+                    -> m ()
 runContainerAndExit modConfig
                     mprojectRoot
                     cmnd
                     args
-                    envVars =
+                    envVars
+                    after =
   do config <- fmap modConfig (asks getConfig)
      let docker = configDocker config
      envOverride <- getEnvOverride (configPlatform config)
@@ -177,7 +182,7 @@ runContainerAndExit modConfig
              Just x -> (x,False)
              Nothing ->
                --EKB TODO: remove this and oldImage after lts-1.x images no longer in use
-               let sandboxName = maybe "default" id (lookupImageEnv "SANDBOX_NAME" imageEnvVars)
+               let sandboxName = fromMaybe "default" (lookupImageEnv "SANDBOX_NAME" imageEnvVars)
                    maybeImageCabalRemoteRepoName = lookupImageEnv "CABAL_REMOTE_REPO_NAME" imageEnvVars
                    maybeImageStackageSlug = lookupImageEnv "STACKAGE_SLUG" imageEnvVars
                    maybeImageStackageDate = lookupImageEnv "STACKAGE_DATE" imageEnvVars
@@ -203,7 +208,7 @@ runContainerAndExit modConfig
            mapM_ createTree
                  (concat [[sandboxHomeDir, sandboxSandboxDir, stackRoot] ++
                           sandboxSubdirs]))
-     exec
+     execXXX
        plainEnvSettings
        "docker"
        (concat
@@ -241,7 +246,7 @@ runContainerAndExit modConfig
          ,map (\(k,v) -> k ++ "=" ++ v) envVars
          ,[cmnd]
          ,args])
-
+       after
   where
     lookupImageEnv name vars =
       case lookup name vars of

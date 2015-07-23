@@ -462,6 +462,7 @@ setupCmd SetupCmdOpts{..} go@GlobalOpts{..} = do
               $logInfo "To use this GHC and packages outside of a project, consider using:"
               $logInfo "stack ghc, stack ghci, stack runghc, or stack exec"
               )
+          (return ())
 
 withConfig :: GlobalOpts
            -> StackT Config IO ()
@@ -469,18 +470,32 @@ withConfig :: GlobalOpts
 withConfig go@GlobalOpts{..} inner = do
     (manager, lc) <- loadConfigWithOpts go
     runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
-        Docker.reexecWithOptionalContainer (lcProjectRoot lc) $
-            runStackT manager globalLogLevel (lcConfig lc) globalTerminal
-                inner
+        Docker.reexecWithOptionalContainer (lcProjectRoot lc)
+            (runStackT manager globalLogLevel (lcConfig lc) globalTerminal inner)
+            (return ())
 
 withBuildConfig :: GlobalOpts
                 -> NoBuildConfigStrategy
                 -> StackT EnvConfig IO ()
                 -> IO ()
-withBuildConfig go@GlobalOpts{..} strat inner = do
+withBuildConfig go strat inner =
+    withBuildConfigAfter go strat inner (return ())
+
+withBuildConfigAfter
+    :: GlobalOpts
+    -> NoBuildConfigStrategy
+    -> StackT EnvConfig IO ()
+    -- ^ Action that uses the build config.  If Docker is enabled for builds,
+    -- this will be run in a Docker container.
+    -> StackT Config IO ()
+    -- ^ Action to perform after the build.  This will be run on the host
+    -- OS even if Docker is enabled for builds.  The build config is not
+    -- available in this action, since that would require build tools to be
+    -- installed on the host OS.
+    -> IO ()
+withBuildConfigAfter go@GlobalOpts{..} strat inner after = do
     (manager, lc) <- loadConfigWithOpts go
-    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
-        Docker.reexecWithOptionalContainer (lcProjectRoot lc) $ do
+    let inner' = do
             bconfig <- runStackLoggingT manager globalLogLevel globalTerminal $
                 lcLoadBuildConfig lc globalResolver strat
             envConfig <-
@@ -493,6 +508,8 @@ withBuildConfig go@GlobalOpts{..} strat inner = do
                 envConfig
                 globalTerminal
                 inner
+    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+        Docker.reexecWithOptionalContainer (lcProjectRoot lc) inner' after
 
 cleanCmd :: () -> GlobalOpts -> IO ()
 cleanCmd () go = withBuildConfig go ThrowException clean
@@ -603,9 +620,10 @@ execCmd ExecOpts {..} go@GlobalOpts{..} =
             runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
                 Docker.execWithOptionalContainer
                     (lcProjectRoot lc)
-                    (return (eoCmd, eoArgs, id)) $
-                    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
-                        exec plainEnvSettings eoCmd eoArgs
+                    (return (eoCmd, eoArgs, id))
+                    (runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+                        exec plainEnvSettings eoCmd eoArgs)
+                    (return ())
         ExecOptsEmbellished {..} ->
            withBuildConfig go ExecStrategy $ do
                let targets = concatMap words eoPackages
@@ -655,13 +673,15 @@ dockerCleanupCmd cleanupOpts go@GlobalOpts{..} = do
 
 imgDockerCmd :: () -> GlobalOpts -> IO ()
 imgDockerCmd () go@GlobalOpts{..} = do
-    withBuildConfig
+    withBuildConfigAfter
         go
         ExecStrategy
         (do Stack.Build.build
                 (const (return ()))
                 defaultBuildOpts
             Docker.preventInContainer Image.imageDocker)
+        --FIXME: this action is run after the container exits.
+        (return ())
 
 -- | Load the configuration with a manager. Convenience function used
 -- throughout this module.

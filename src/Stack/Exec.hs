@@ -36,8 +36,13 @@ plainEnvSettings = EnvSettings
 
 -- | Execute a process within the Stack configured environment.
 exec :: (HasConfig r, MonadReader r m, MonadIO m, MonadLogger m, MonadThrow m)
-        => EnvSettings -> String -> [String] -> m b
-exec envSettings cmd args = do
+     => EnvSettings -> String -> [String] -> m b
+exec envSettings cmd args = execXXX envSettings cmd args (return ())
+
+-- | Execute a process within the Stack configured environment.
+execXXX :: (HasConfig r, MonadReader r m, MonadIO m, MonadLogger m, MonadThrow m)
+        => EnvSettings -> String -> [String] -> m () -> m b
+execXXX envSettings cmd args after = do
     config <- asks getConfig
     menv <- liftIO (configEnvOverride config envSettings)
     exists <- liftIO $ doesFileExist cmd
@@ -52,4 +57,7 @@ exec envSettings cmd args = do
     $logProcessRun cmd' args
     (Nothing, Nothing, Nothing, ph) <- liftIO (P.createProcess cp)
     ec <- liftIO (P.waitForProcess ph)
+    case ec of
+      ExitSuccess -> after
+      _ -> return ()
     liftIO (exitWith ec)
