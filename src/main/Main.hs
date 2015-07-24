@@ -436,6 +436,7 @@ setupCmd SetupCmdOpts{..} go@GlobalOpts{..} = do
   runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
       Docker.reexecWithOptionalContainer
           (lcProjectRoot lc)
+          (return ())
           (runStackLoggingT manager globalLogLevel globalTerminal $ do
               (ghc, mstack) <-
                   case scoGhcVersion of
@@ -471,6 +472,7 @@ withConfig go@GlobalOpts{..} inner = do
     (manager, lc) <- loadConfigWithOpts go
     runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
         Docker.reexecWithOptionalContainer (lcProjectRoot lc)
+            (return ())
             (runStackT manager globalLogLevel (lcConfig lc) globalTerminal inner)
             (return ())
 
@@ -479,11 +481,16 @@ withBuildConfig :: GlobalOpts
                 -> StackT EnvConfig IO ()
                 -> IO ()
 withBuildConfig go strat inner =
-    withBuildConfigAfter go strat inner (return ())
+    withBuildConfigExt go strat (return ()) inner (return ())
 
-withBuildConfigAfter
+withBuildConfigExt
     :: GlobalOpts
     -> NoBuildConfigStrategy
+    -> StackT Config IO ()
+    -- ^ Action to perform after before build.  This will be run on the host
+    -- OS even if Docker is enabled for builds.  The build config is not
+    -- available in this action, since that would require build tools to be
+    -- installed on the host OS.
     -> StackT EnvConfig IO ()
     -- ^ Action that uses the build config.  If Docker is enabled for builds,
     -- this will be run in a Docker container.
@@ -493,7 +500,7 @@ withBuildConfigAfter
     -- available in this action, since that would require build tools to be
     -- installed on the host OS.
     -> IO ()
-withBuildConfigAfter go@GlobalOpts{..} strat inner after = do
+withBuildConfigExt go@GlobalOpts{..} strat before inner after = do
     (manager, lc) <- loadConfigWithOpts go
     let inner' = do
             bconfig <- runStackLoggingT manager globalLogLevel globalTerminal $
@@ -509,7 +516,7 @@ withBuildConfigAfter go@GlobalOpts{..} strat inner after = do
                 globalTerminal
                 inner
     runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
-        Docker.reexecWithOptionalContainer (lcProjectRoot lc) inner' after
+        Docker.reexecWithOptionalContainer (lcProjectRoot lc) before inner' after
 
 cleanCmd :: () -> GlobalOpts -> IO ()
 cleanCmd () go = withBuildConfig go ThrowException clean
@@ -621,6 +628,7 @@ execCmd ExecOpts {..} go@GlobalOpts{..} =
                 Docker.execWithOptionalContainer
                     (lcProjectRoot lc)
                     (return (eoCmd, eoArgs, id))
+                    (return ())
                     (runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
                         exec plainEnvSettings eoCmd eoArgs)
                     (return ())
@@ -705,6 +713,7 @@ imgDockerCmd () go@GlobalOpts{..} = do
         globalTerminal
         (Docker.reexecWithOptionalContainer
              (lcProjectRoot lc)
+             (return ())
              inner
              after)
 

@@ -64,6 +64,7 @@ import           Text.Printf (printf)
 reexecWithOptionalContainer
     :: M env m
     => Maybe (Path Abs Dir)
+    -> m ()
     -> IO ()
     -> m ()
     -> m ()
@@ -89,18 +90,24 @@ execWithOptionalContainer
     :: M env m
     => Maybe (Path Abs Dir)
     -> IO (FilePath,[String],Config -> Config)
+    -> m ()
     -> IO ()
     -> m ()
     -> m ()
-execWithOptionalContainer mprojectRoot getCmdArgs inner after =
+execWithOptionalContainer mprojectRoot getCmdArgs before inner after =
   do config <- asks getConfig
      inContainer <- getInContainer
-     if inContainer || not (dockerEnable (configDocker config))
-        then do liftIO inner
-                after
-                liftIO (exitWith ExitSuccess)
-        else do (cmd_,args,modConfig) <- liftIO getCmdArgs
-                runContainerAndExit modConfig mprojectRoot cmd_ args [] after
+     if | not (dockerEnable (configDocker config)) ->
+            do before
+               liftIO inner
+               after
+               liftIO (exitWith ExitSuccess)
+        | inContainer ->
+            liftIO (do inner
+                       exitWith ExitSuccess)
+        | otherwise ->
+            do (cmd_,args,modConfig) <- liftIO getCmdArgs
+               runContainerAndExit modConfig mprojectRoot before cmd_ args [] after
 
 -- | If Docker is enabled, re-runs the OS command returned by the second argument in a
 -- Docker container.  Otherwise, throws 'DockerMustBeEnabledException'.
@@ -110,12 +117,13 @@ execWithRequiredContainer
     -> IO (FilePath,[String],Config -> Config)
     -> m ()
     -> m ()
-execWithRequiredContainer mprojectRoot getCmdArgs after =
+    -> m ()
+execWithRequiredContainer mprojectRoot getCmdArgs before after =
   do config <- asks getConfig
      unless (dockerEnable (configDocker config))
             (throwM DockerMustBeEnabledException)
      (cmd_,args,modConfig) <- liftIO getCmdArgs
-     runContainerAndExit modConfig mprojectRoot cmd_ args [] after
+     runContainerAndExit modConfig mprojectRoot before cmd_ args [] after
 
 -- | Error if running in a container.
 preventInContainer :: (MonadIO m,MonadThrow m) => m () -> m ()
@@ -137,6 +145,7 @@ getInContainer =
 runContainerAndExit :: M env m
                     => (Config -> Config)
                     -> Maybe (Path Abs Dir)
+                    -> m ()
                     -> FilePath
                     -> [String]
                     -> [(String, String)]
@@ -144,6 +153,7 @@ runContainerAndExit :: M env m
                     -> m ()
 runContainerAndExit modConfig
                     mprojectRoot
+                    before
                     cmnd
                     args
                     envVars
@@ -211,6 +221,7 @@ runContainerAndExit modConfig
            mapM_ createTree
                  (concat [[sandboxHomeDir, sandboxSandboxDir, stackRoot] ++
                           sandboxSubdirs]))
+     before
      execXXX
        plainEnvSettings
        "docker"
