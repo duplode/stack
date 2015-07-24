@@ -673,15 +673,40 @@ dockerCleanupCmd cleanupOpts go@GlobalOpts{..} = do
 
 imgDockerCmd :: () -> GlobalOpts -> IO ()
 imgDockerCmd () go@GlobalOpts{..} = do
-    withBuildConfigAfter
-        go
-        ExecStrategy
-        (do Stack.Build.build
-                (const (return ()))
-                defaultBuildOpts
-            Docker.preventInContainer Image.imageDocker)
-        --FIXME: this action is run after the container exits.
-        (return ())
+    (manager,lc) <- loadConfigWithOpts go
+    bconfig <-
+        runStackLoggingT
+            manager
+            globalLogLevel
+            globalTerminal
+            (lcLoadBuildConfig lc globalResolver ExecStrategy)
+    envConfig <-
+        runStackT manager globalLogLevel bconfig globalTerminal setupEnv
+    let inner = runStackT
+                manager
+                globalLogLevel
+                envConfig
+                globalTerminal
+                (Stack.Build.build
+                     (const (return ()))
+                     (defaultBuildOpts
+                      { boptsInstallExes = True
+                      }))
+        after = runStackT
+                manager
+                globalLogLevel
+                envConfig
+                globalTerminal
+                Image.imageDocker
+    runStackT
+        manager
+        globalLogLevel
+        envConfig
+        globalTerminal
+        (Docker.reexecWithOptionalContainer
+             (lcProjectRoot lc)
+             inner
+             after)
 
 -- | Load the configuration with a manager. Convenience function used
 -- throughout this module.
