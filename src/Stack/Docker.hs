@@ -50,6 +50,7 @@ import           Stack.Types
 import           Stack.Types.Internal
 import           Stack.Docker.GlobalDB
 import           System.Environment (lookupEnv,getProgName,getArgs,getExecutablePath)
+import           System.Exit (ExitCode (ExitSuccess), exitWith)
 import           System.FilePath (dropTrailingPathSeparator,takeBaseName)
 import           System.Info (arch,os)
 import           System.IO (stderr,stdin,stdout,hIsTerminalDevice)
@@ -95,7 +96,9 @@ execWithOptionalContainer mprojectRoot getCmdArgs inner after =
   do config <- asks getConfig
      inContainer <- getInContainer
      if inContainer || not (dockerEnable (configDocker config))
-        then liftIO inner
+        then do liftIO inner
+                after
+                liftIO (exitWith ExitSuccess)
         else do (cmd_,args,modConfig) <- liftIO getCmdArgs
                 runContainerAndExit modConfig mprojectRoot cmd_ args [] after
 
