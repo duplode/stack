@@ -433,18 +433,19 @@ setupParser = SetupCmdOpts
 setupCmd :: SetupCmdOpts -> GlobalOpts -> IO ()
 setupCmd SetupCmdOpts{..} go@GlobalOpts{..} = do
   (manager,lc) <- loadConfigWithOpts go
-  runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+  runStackTGlobal manager (lcConfig lc) go $
       Docker.reexecWithOptionalContainer
           (lcProjectRoot lc)
-          (return ())
-          (runStackLoggingT manager globalLogLevel globalTerminal $ do
+          Nothing
+          (runStackLoggingTGlobal manager go $ do
               (ghc, mstack) <-
                   case scoGhcVersion of
                       Just v -> return (v, Nothing)
                       Nothing -> do
                           bc <- lcLoadBuildConfig lc globalResolver ExecStrategy
                           return (bcGhcVersionExpected bc, Just $ bcStackYaml bc)
-              mpaths <- runStackT manager globalLogLevel (lcConfig lc) globalTerminal $ ensureGHC SetupOpts
+              mpaths <- runStackTGlobal manager (lcConfig lc) go $
+                  ensureGHC SetupOpts
                   { soptsInstallIfMissing = True
                   , soptsUseSystem =
                     (configSystemGHC $ lcConfig lc)
@@ -463,30 +464,30 @@ setupCmd SetupCmdOpts{..} go@GlobalOpts{..} = do
               $logInfo "To use this GHC and packages outside of a project, consider using:"
               $logInfo "stack ghc, stack ghci, stack runghc, or stack exec"
               )
-          (return ())
+          Nothing
 
 withConfig :: GlobalOpts
            -> StackT Config IO ()
            -> IO ()
 withConfig go@GlobalOpts{..} inner = do
     (manager, lc) <- loadConfigWithOpts go
-    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+    runStackTGlobal manager (lcConfig lc) go $
         Docker.reexecWithOptionalContainer (lcProjectRoot lc)
-            (return ())
-            (runStackT manager globalLogLevel (lcConfig lc) globalTerminal inner)
-            (return ())
+            Nothing
+            (runStackTGlobal manager (lcConfig lc) go inner)
+            Nothing
 
 withBuildConfig :: GlobalOpts
                 -> NoBuildConfigStrategy
                 -> StackT EnvConfig IO ()
                 -> IO ()
 withBuildConfig go strat inner =
-    withBuildConfigExt go strat (return ()) inner (return ())
+    withBuildConfigExt go strat Nothing inner Nothing
 
 withBuildConfigExt
     :: GlobalOpts
     -> NoBuildConfigStrategy
-    -> StackT Config IO ()
+    -> Maybe (StackT Config IO ())
     -- ^ Action to perform after before build.  This will be run on the host
     -- OS even if Docker is enabled for builds.  The build config is not
     -- available in this action, since that would require build tools to be
@@ -494,29 +495,28 @@ withBuildConfigExt
     -> StackT EnvConfig IO ()
     -- ^ Action that uses the build config.  If Docker is enabled for builds,
     -- this will be run in a Docker container.
-    -> StackT Config IO ()
+    -> Maybe (StackT Config IO ())
     -- ^ Action to perform after the build.  This will be run on the host
     -- OS even if Docker is enabled for builds.  The build config is not
     -- available in this action, since that would require build tools to be
     -- installed on the host OS.
     -> IO ()
-withBuildConfigExt go@GlobalOpts{..} strat before inner after = do
+withBuildConfigExt go@GlobalOpts{..} strat mbefore inner mafter = do
     (manager, lc) <- loadConfigWithOpts go
     let inner' = do
-            bconfig <- runStackLoggingT manager globalLogLevel globalTerminal $
+            bconfig <- runStackLoggingTGlobal manager go $
                 lcLoadBuildConfig lc globalResolver strat
             envConfig <-
-                runStackT
-                    manager globalLogLevel bconfig globalTerminal
+                runStackTGlobal
+                    manager bconfig go
                     setupEnv
-            runStackT
+            runStackTGlobal
                 manager
-                globalLogLevel
                 envConfig
-                globalTerminal
+                go
                 inner
-    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
-        Docker.reexecWithOptionalContainer (lcProjectRoot lc) before inner' after
+    runStackTGlobal manager (lcConfig lc) go $
+        Docker.reexecWithOptionalContainer (lcProjectRoot lc) mbefore inner' mafter
 
 cleanCmd :: () -> GlobalOpts -> IO ()
 cleanCmd () go = withBuildConfig go ThrowException clean
@@ -624,14 +624,14 @@ execCmd ExecOpts {..} go@GlobalOpts{..} =
     case eoExtra of
         ExecOptsPlain -> do
             (manager,lc) <- liftIO $ loadConfigWithOpts go
-            runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+            runStackTGlobal manager (lcConfig lc) go $
                 Docker.execWithOptionalContainer
                     (lcProjectRoot lc)
-                    (return (eoCmd, eoArgs, id))
-                    (return ())
-                    (runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+                    (return (eoCmd, eoArgs, [], id))
+                    Nothing
+                    (runStackTGlobal manager (lcConfig lc) go $
                         exec plainEnvSettings eoCmd eoArgs)
-                    (return ())
+                    Nothing
         ExecOptsEmbellished {..} ->
            withBuildConfig go ExecStrategy $ do
                let targets = concatMap words eoPackages
@@ -661,21 +661,21 @@ ideCmd (targets,args) go@GlobalOpts{..} = withBuildConfig go ExecStrategy $ do
 dockerPullCmd :: () -> GlobalOpts -> IO ()
 dockerPullCmd _ go@GlobalOpts{..} = do
     (manager,lc) <- liftIO $ loadConfigWithOpts go
-    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+    runStackTGlobal manager (lcConfig lc) go $
         Docker.preventInContainer Docker.pull
 
 -- | Reset the Docker sandbox.
 dockerResetCmd :: Bool -> GlobalOpts -> IO ()
 dockerResetCmd keepHome go@GlobalOpts{..} = do
     (manager,lc) <- liftIO (loadConfigWithOpts go)
-    runStackLoggingT manager globalLogLevel globalTerminal$ Docker.preventInContainer $
-        Docker.reset (lcProjectRoot lc) keepHome
+    runStackLoggingTGlobal manager go $
+        Docker.preventInContainer $ Docker.reset (lcProjectRoot lc) keepHome
 
 -- | Cleanup Docker images and containers.
 dockerCleanupCmd :: Docker.CleanupOpts -> GlobalOpts -> IO ()
 dockerCleanupCmd cleanupOpts go@GlobalOpts{..} = do
     (manager,lc) <- liftIO $ loadConfigWithOpts go
-    runStackT manager globalLogLevel (lcConfig lc) globalTerminal $
+    runStackTGlobal manager (lcConfig lc) go $
         Docker.preventInContainer $
             Docker.cleanup cleanupOpts
 
@@ -683,44 +683,40 @@ imgDockerCmd :: () -> GlobalOpts -> IO ()
 imgDockerCmd () go@GlobalOpts{..} = do
     (manager,lc) <- loadConfigWithOpts go
     bconfig <-
-        runStackLoggingT
+        runStackLoggingTGlobal
             manager
-            globalLogLevel
-            globalTerminal
+            go
             (lcLoadBuildConfig lc globalResolver ExecStrategy)
     envConfig <-
-        runStackT manager globalLogLevel bconfig globalTerminal setupEnv
-    let inner = runStackT
+        runStackTGlobal manager bconfig go setupEnv
+    let inner = runStackTGlobal
                 manager
-                globalLogLevel
                 envConfig
-                globalTerminal
+                go
                 (Stack.Build.build
                      (const (return ()))
                      (defaultBuildOpts
                       { boptsInstallExes = True
                       }))
-        after = runStackT
+        after = runStackTGlobal
                 manager
-                globalLogLevel
                 envConfig
-                globalTerminal
+                go
                 Image.imageDocker
-    runStackT
+    runStackTGlobal
         manager
-        globalLogLevel
         envConfig
-        globalTerminal
+        go
         (Docker.reexecWithOptionalContainer
              (lcProjectRoot lc)
-             (return ())
+             Nothing
              inner
-             after)
+             (Just after))
 
 -- | Load the configuration with a manager. Convenience function used
 -- throughout this module.
 loadConfigWithOpts :: GlobalOpts -> IO (Manager,LoadConfig (StackLoggingT IO))
-loadConfigWithOpts GlobalOpts{..} = do
+loadConfigWithOpts go@GlobalOpts{..} = do
     manager <- newTLSManager
     mstackYaml <-
         case globalStackYaml of
@@ -728,10 +724,9 @@ loadConfigWithOpts GlobalOpts{..} = do
             Just fp -> do
                 path <- canonicalizePath fp >>= parseAbsFile
                 return $ Just path
-    lc <- runStackLoggingT
+    lc <- runStackLoggingTGlobal
               manager
-              globalLogLevel
-              globalTerminal
+              go
               (loadConfig globalConfigMonoid mstackYaml)
     return (manager,lc)
 
